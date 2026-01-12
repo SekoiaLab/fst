@@ -1035,6 +1035,44 @@ mod regex_tests {
         output: vec!["abab", "ababab"],
     }
 
+    // using start/end anchors is a noop
+
+    test_range_with_aut! {
+        fst_range_aut_no_anchor,
+        min: Bound::Unbounded, max: Bound::Unbounded,
+        imin: 0, imax: 1,
+        aut: Regex::new("ab").unwrap(),
+        input: vec!["cab", "ab", "abc", "xyz"],
+        output: vec!["ab"],
+    }
+
+    test_range_with_aut! {
+        fst_range_aut_start_anchor,
+        min: Bound::Unbounded, max: Bound::Unbounded,
+        imin: 0, imax: 1,
+        aut: Regex::new("^ab").unwrap(),
+        input: vec!["cab", "ab", "abc", "xyz"],
+        output: vec!["ab"],
+    }
+
+    test_range_with_aut! {
+        fst_range_aut_end_anchor,
+        min: Bound::Unbounded, max: Bound::Unbounded,
+        imin: 0, imax: 1,
+        aut: Regex::new("ab$").unwrap(),
+        input: vec!["cab", "ab", "abc", "xyz"],
+        output: vec!["ab"],
+    }
+
+    test_range_with_aut! {
+        fst_range_aut_both_anchors,
+        min: Bound::Unbounded, max: Bound::Unbounded,
+        imin: 0, imax: 1,
+        aut: Regex::new("^ab$").unwrap(),
+        input: vec!["cab", "ab", "abc", "xyz"],
+        output: vec!["ab"],
+    }
+
     use proptest::prelude::*;
 
     const REGEX_STRING: &'static str = "[a-c\\.]{0,4}";
