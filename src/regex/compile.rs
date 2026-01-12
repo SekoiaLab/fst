@@ -1,5 +1,6 @@
 use super::Error;
 use super::Inst;
+use regex_syntax::hir::Look;
 use regex_syntax::hir::{Class, ClassUnicode, ClassUnicodeRange};
 use regex_syntax::hir::{Hir, HirKind};
 use utf8_ranges::{Utf8Sequence, Utf8Sequences};
@@ -95,6 +96,9 @@ impl Compiler {
                     self.set_jump(jmp, j1);
                     self.set_split(split, j2, j3);
                 }
+            }
+            HirKind::Look(Look::Start) | HirKind::Look(Look::End) => {
+                // can be ignored because we always match full strings
             }
             HirKind::Look(_) => return Err(Error::NoEmpty),
         }
