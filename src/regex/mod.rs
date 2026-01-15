@@ -1,10 +1,11 @@
-use crate::Automaton;
+use crate::{regex::escape::escape_start_and_end_anchors, Automaton};
 use regex_syntax;
 use std::fmt;
 
 mod compile;
 mod dfa;
 mod error;
+mod escape;
 mod sparse;
 
 pub use self::error::Error;
@@ -83,7 +84,8 @@ impl Regex {
 
     fn with_size_limit(size: usize, re: &str) -> Result<Regex, Error> {
         let hir = regex_syntax::Parser::new().parse(re)?;
-        let insts = self::compile::Compiler::new(size).compile(&hir)?;
+        let escaped_hir = escape_start_and_end_anchors(hir);
+        let insts = self::compile::Compiler::new(size).compile(&escaped_hir)?;
         let dfa = self::dfa::DfaBuilder::new(insts).build()?;
         Ok(Regex {
             original: re.to_owned(),
