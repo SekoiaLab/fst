@@ -19,6 +19,9 @@ mod regex;
 #[cfg(feature = "regex")]
 pub use self::regex::Regex;
 
+#[cfg(feature = "regex")]
+pub use regex_syntax;
+
 mod error;
 #[path = "automaton/mod.rs"]
 mod inner_automaton;
