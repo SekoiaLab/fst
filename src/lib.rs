@@ -17,7 +17,7 @@ pub use crate::stream::{IntoStreamer, Streamer};
 mod regex;
 
 #[cfg(feature = "regex")]
-pub use self::regex::Regex;
+pub use self::regex::{DisjunctionRegex, Regex};
 
 #[cfg(feature = "regex")]
 pub use regex_syntax;
