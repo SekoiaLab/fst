@@ -70,6 +70,14 @@ pub enum Inst {
 /// Default maximum size (in bytes) of the compiled regex program.
 const DEFAULT_SIZE_LIMIT: usize = 10 * (1 << 20);
 
+/// The result of compiling a disjunction of regexes.
+pub enum DisjunctionRegex {
+    /// The regexes were compiled into a single DFA.
+    Single(Regex),
+    /// The regexes had to be compiled into multiple DFAs.
+    Multi(Vec<Regex>),
+}
+
 impl Regex {
     /// Create a new regular expression query.
     ///
@@ -87,61 +95,78 @@ impl Regex {
 
     fn with_size_limit(size: usize, re: &str) -> Result<Regex, Error> {
         let hir = regex_syntax::Parser::new().parse(re)?;
-        Regex::from_hir_with_size_limit(size, hir)
+        Regex::from_hir_with_size_limit(size, hir, re)
     }
 
-    /// Build a regex directly from an already-parsed `regex_syntax` HIR.
-    ///
-    /// This is the building block used to combine several patterns into a
-    /// single automaton without round-tripping through a concatenated pattern
-    /// string (see [`Regex::from_patterns`]).
-    #[inline]
-    pub fn from_hir(hir: regex_syntax::hir::Hir) -> Result<Regex, Error> {
-        Regex::from_hir_with_size_limit(DEFAULT_SIZE_LIMIT, hir)
-    }
-
-    /// Same as [`Regex::from_hir`], with an explicit compiled-size limit.
-    fn from_hir_with_size_limit(size: usize, hir: regex_syntax::hir::Hir) -> Result<Regex, Error> {
-        // `Hir`'s Display impl renders a valid, semantically-equivalent pattern
-        // string; we keep it only for the `Debug` impl of `Regex`.
-        let original = hir.to_string();
+    fn from_hir_with_size_limit(
+        size: usize,
+        hir: regex_syntax::hir::Hir,
+        original: impl ToString,
+    ) -> Result<Regex, Error> {
         let escaped_hir = escape_start_and_end_anchors(hir);
         let insts = self::compile::Compiler::new(size).compile(&escaped_hir)?;
         let dfa = self::dfa::DfaBuilder::new(insts).build()?;
-        Ok(Regex { original, dfa })
+        Ok(Regex {
+            original: original.to_string(),
+            dfa,
+        })
     }
 
-    /// Build a single regex automaton that matches the **union** of the given
-    /// patterns (i.e. as if they were joined by alternation `|`).
+    /// Build a regex automaton that matches the **union** of the given patterns
+    /// (i.e. as if they were joined by alternation `|`).
     ///
     /// Each pattern is parsed independently and combined at the HIR level with
     /// `Hir::alternation`, which avoids string-splicing pitfalls (operator
     /// precedence, inline flags, anchors) of concatenating raw pattern strings.
     ///
-    /// Note: an empty iterator yields an automaton that matches nothing
-    /// (`Hir::alternation(vec![])` is `Hir::fail()`). Callers that require at
+    /// For some alternations, e.g regexes starting with a wildcard, the DFA
+    /// grows exponentially. If the size limit is exceeded, we fall back to
+    /// per-pattern automata. This is slower because you need to perform one
+    /// state transition per pattern and state pruning is less efficient.
+    ///
+    /// Note: an empty slice yields an error. Callers that require at
     /// least one pattern should enforce that themselves.
     #[inline]
-    pub fn from_patterns<I, S>(patterns: I) -> Result<Regex, Error>
+    pub fn from_patterns<S>(patterns: &[S]) -> Result<DisjunctionRegex, Error>
     where
-        I: IntoIterator<Item = S>,
-        S: AsRef<str>,
+        S: AsRef<str> + std::fmt::Debug,
     {
         Regex::from_patterns_with_size_limit(DEFAULT_SIZE_LIMIT, patterns)
     }
 
     /// Same as [`Regex::from_patterns`], with an explicit compiled-size limit.
-    fn from_patterns_with_size_limit<I, S>(size: usize, patterns: I) -> Result<Regex, Error>
+    fn from_patterns_with_size_limit<S>(
+        size: usize,
+        patterns: &[S],
+    ) -> Result<DisjunctionRegex, Error>
     where
-        I: IntoIterator<Item = S>,
-        S: AsRef<str>,
+        S: AsRef<str> + std::fmt::Debug,
     {
-        let mut hirs = Vec::new();
+        let mut hirs = Vec::with_capacity(patterns.len());
+
         for pattern in patterns {
             hirs.push(regex_syntax::Parser::new().parse(pattern.as_ref())?);
         }
-        let combined = regex_syntax::hir::Hir::alternation(hirs);
-        Regex::from_hir_with_size_limit(size, combined)
+        // this clone is a bit unfortunate, but we can live with it.
+        let combined = regex_syntax::hir::Hir::alternation(hirs.clone());
+        match Regex::from_hir_with_size_limit(size, combined, format!("{patterns:?}")) {
+            Ok(regex) => Ok(DisjunctionRegex::Single(regex)),
+            Err(Error::TooManyStates(_)) => {
+                // DFA sizes can grow exponentially with the number of patterns.
+                // If its size exceeds the limit, compile each pattern
+                // separately.
+                let mut regexes = Vec::with_capacity(hirs.len());
+                for (hir, pattern) in hirs.into_iter().zip(patterns) {
+                    regexes.push(Regex::from_hir_with_size_limit(
+                        size,
+                        hir,
+                        pattern.as_ref(),
+                    )?);
+                }
+                Ok(DisjunctionRegex::Multi(regexes))
+            }
+            Err(e) => Err(e),
+        }
     }
 }
 
@@ -169,6 +194,29 @@ impl Automaton for Regex {
     }
 }
 
+impl Automaton for Vec<Regex> {
+    type State = Vec<<Regex as Automaton>::State>;
+
+    fn start(&self) -> Self::State {
+        self.iter().map(|r| r.start()).collect()
+    }
+
+    fn is_match(&self, state: &Self::State) -> bool {
+        self.iter().zip(state).any(|(r, s)| r.is_match(s))
+    }
+
+    fn can_match(&self, state: &Self::State) -> bool {
+        self.iter().zip(state).any(|(r, s)| r.can_match(s))
+    }
+
+    fn accept(&self, state: &Self::State, byte: u8) -> Self::State {
+        self.iter()
+            .zip(state)
+            .map(|(r, s)| r.accept(s, byte))
+            .collect()
+    }
+}
+
 impl fmt::Debug for Regex {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         writeln!(f, "Regex({:?})", self.original)?;
@@ -193,7 +241,7 @@ mod tests {
     use super::*;
     use crate::Automaton;
 
-    fn matches(re: &Regex, s: &str) -> bool {
+    fn matches(re: impl Automaton, s: &str) -> bool {
         let mut state = re.start();
         for &b in s.as_bytes() {
             state = re.accept(&state, b);
@@ -203,7 +251,10 @@ mod tests {
 
     #[test]
     fn test_from_patterns_union_equivalence() {
-        let combined = Regex::from_patterns(["abc.*", "xyz"]).unwrap();
+        let combined = Regex::from_patterns(&["abc.*", "xyz"]).unwrap();
+        let DisjunctionRegex::Single(combined) = combined else {
+            panic!("Expected DisjunctionRegex::Single")
+        };
         let re_abc = Regex::new("abc.*").unwrap();
         let re_xyz = Regex::new("xyz").unwrap();
         let re_alt = Regex::new("(?:abc.*)|(?:xyz)").unwrap();
@@ -226,28 +277,15 @@ mod tests {
     }
 
     #[test]
-    fn test_from_hir_parity() {
-        let hir = regex_syntax::Parser::new().parse("ab.*").unwrap();
-        let from_hir = Regex::from_hir(hir).unwrap();
-        let from_new = Regex::new("ab.*").unwrap();
-
-        for key in &["ab", "abcdef", "abc", "b", "a", ""] {
-            assert_eq!(
-                matches(&from_hir, key),
-                matches(&from_new, key),
-                "from_hir mismatch on {:?}",
-                key
-            );
-        }
-    }
-
-    #[test]
     fn test_anchors_parity() {
         // Patterns with ^ and $ are treated as literals by this crate.
         // Verify from_patterns([pat]) behaves identically to new(pat).
         let pat = "^hello$";
         let from_new = Regex::new(pat).unwrap();
-        let from_patterns = Regex::from_patterns([pat]).unwrap();
+        let from_patterns = Regex::from_patterns(&[pat]).unwrap();
+        let DisjunctionRegex::Single(from_patterns) = from_patterns else {
+            panic!("Expected DisjunctionRegex::Single")
+        };
 
         for key in &["hello", "^hello$", "", "hello\n"] {
             assert_eq!(
@@ -262,7 +300,7 @@ mod tests {
     #[test]
     fn test_size_limit_error() {
         // A tiny size limit should produce a compilation error, not a panic.
-        let result = Regex::from_patterns_with_size_limit(1, ["abc.*", "xyz.*"]);
+        let result = Regex::from_patterns_with_size_limit(1, &["abc.*", "xyz.*"]);
         assert!(
             result.is_err(),
             "expected error with tiny size limit, got Ok"
@@ -270,14 +308,46 @@ mod tests {
     }
 
     #[test]
+    fn test_from_patterns_substring_builds_multi() {
+        // 10 substring patterns (.*x.*) cause the combined DFA to grow
+        // exponentially and exceed the default size limit
+        let patterns: Vec<String> = (0..10).map(|i| format!(".*{}word.*", i)).collect();
+        let result = Regex::from_patterns(&patterns).unwrap();
+        let DisjunctionRegex::Multi(ref regexes) = result else {
+            panic!("expected DisjunctionRegex::Multi for 10 wildcard-prefixed patterns");
+        };
+
+        let test_keys = [
+            ("hello0wordbye", true),
+            ("foo5wordbar", true),
+            ("9word", true),
+            ("0wordx", true),
+            ("word", false),
+            ("nope", false),
+            ("", false),
+            ("3wordmiddle", true),
+            ("prefix1wordsuffix", true),
+        ];
+
+        for (key, expected) in &test_keys {
+            assert_eq!(
+                matches(regexes, key),
+                *expected,
+                "multi mismatch on {:?}",
+                key
+            );
+        }
+    }
+
+    #[test]
     fn test_empty_patterns_matches_nothing() {
         // `Hir::alternation(vec![])` produces `Hir::fail()`, which this
         // crate's compiler cannot represent as a DFA (it returns `NoBytes`).
         // Callers must therefore ensure at least one pattern is provided.
-        let result = Regex::from_patterns(Vec::<&str>::new());
-        assert!(
-            result.is_err(),
-            "expected Err for empty pattern list, got Ok"
-        );
+        let result = Regex::from_patterns(&[] as &[&str]);
+        assert!(matches!(
+            result,
+            Err(Error::NoBytes)
+        ));
     }
 }
