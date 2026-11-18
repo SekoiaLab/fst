@@ -93,6 +93,12 @@ impl Regex {
         Regex::with_size_limit(DEFAULT_SIZE_LIMIT, re)
     }
 
+    /// Returns the number of heap bytes held by the regex, most of which is
+    /// the DFA transition table.
+    pub fn memory_usage(&self) -> usize {
+        self.original.capacity() + self.dfa.memory_usage()
+    }
+
     fn with_size_limit(size: usize, re: &str) -> Result<Regex, Error> {
         let hir = regex_syntax::Parser::new().parse(re)?;
         Regex::from_hir_with_size_limit(size, hir, re)
@@ -247,6 +253,18 @@ mod tests {
             state = re.accept(&state, b);
         }
         re.is_match(&state)
+    }
+
+    #[test]
+    fn test_memory_usage() {
+        // Each DFA state holds a 256-entry transition table.
+        let transition_table_bytes = 256 * std::mem::size_of::<Option<usize>>();
+        let literal = Regex::new("abc").unwrap();
+        // "abc" needs at least one state per prefix: "", "a", "ab", "abc".
+        assert!(literal.memory_usage() >= 4 * transition_table_bytes);
+
+        let leading_wildcard = Regex::new("(?i).*abc.*").unwrap();
+        assert!(leading_wildcard.memory_usage() > literal.memory_usage());
     }
 
     #[test]

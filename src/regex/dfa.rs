@@ -112,6 +112,18 @@ impl DfaBuilder {
 }
 
 impl Dfa {
+    /// Returns the number of heap bytes held by the DFA.
+    pub fn memory_usage(&self) -> usize {
+        let insts_bytes = self.insts.capacity() * std::mem::size_of::<Inst>();
+        let states_bytes = self.states.capacity() * std::mem::size_of::<State>();
+        let state_insts_bytes: usize = self
+            .states
+            .iter()
+            .map(|state| state.insts.capacity() * std::mem::size_of::<usize>())
+            .sum();
+        insts_bytes + states_bytes + state_insts_bytes
+    }
+
     pub fn is_match(&self, si: usize) -> bool {
         self.states[si].is_match
     }
